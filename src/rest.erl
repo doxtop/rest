@@ -21,6 +21,7 @@ rest_record([_ | Forms]) -> rest_record(Forms).
 
 record_field({record_field, _, {atom, _, Field}   }) -> Field;
 record_field({record_field, _, {atom, _, Field}, _}) -> Field;
+record_field({typed_record_field, {record_field,_,{atom, _, Field}}, _})   -> Field;
 record_field({typed_record_field, {record_field,_,{atom, _, Field},_}, _}) -> Field.
 
 record_fields(RecordName, [{attribute, _, record, {RecordName, Fields}} | _Forms]) ->
