@@ -57,10 +57,24 @@ handle_urlencoded_data(Req, #st{resource_module = M, resource_id = Id} = State) 
     {handle_data(M, Id, Data), Req2, State}.
 
 handle_json_data(Req, #st{resource_module = M, resource_id = Id} = State) ->
-    {ok, Binary, Req2} = cowboy_req:body(Req),
-    Data = case ?REST_JSON:decode(Binary) of {struct, Struct} -> Struct; S -> S end,
-    {handle_data(M, Id, Data), Req2, State}.
+    case cowboy_req:body(Req, []) of
+        {ok, Binary, Req2} ->
+            case ?REST_JSON:try_decode(Binary, []) of
+                {ok, Value, _} -> 
+                    case handle_data(M, Id, Value) of
+                        Handled when is_boolean(Handled) -> {Handled, Req2, State};
+                        Body -> {true, cowboy_req:set_resp_body(iolist_to_binary(Body), Req2), State} end;
 
+                {error, _} -> {false,Req,State} end; % bad request is not a server fault
+        {more,_,_}  -> {false, Req, State}; %> 1Mb text entry, really?
+        {error,_}   -> {false, Req, State} end.
+
+-spec handle_data(_,_,_) -> boolean() | iodata().
+handle_data(Mod, Id, {struct, Data}) -> handle_data(Mod, Id, Data);
+handle_data(Mod, Id, {Data}) ->
+    case erlang:function_exported(Mod, unit, 0) of 
+        true -> handle_data(Mod, Id, Mod:from_json(Data, Mod:unit()));
+        false -> false end;
 handle_data(Mod, Id, Data) ->
     Valid = case erlang:function_exported(Mod, validate, 2) of
                 true  -> Mod:validate(Id, Data);
@@ -81,6 +95,7 @@ default_put(Mod, Id, Data) ->
         false -> true end,
     Mod:post(NewRes).
 
+default_validate(Mod, Id, Data) when is_tuple(Data) -> true;
 default_validate(Mod, Id, Data) ->
     Allowed = case erlang:function_exported(Mod, keys_allowed, 1) of
                   true  -> Mod:keys_allowed(proplists:get_keys(Data));
