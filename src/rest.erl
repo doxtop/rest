@@ -1,32 +1,44 @@
 -module(rest).
 -author('Dmitry Bushmelev').
--export([behaviour_info/1, parse_transform/2, generate_to_json/3,
-         generate_from_json/3, from_json/1, to_json/1, to_binary/1]).
+-export([behaviour_info/1, parse_transform/2, generate_to_json/3, binarize/1,
+         generate_from_json/3, from_json/2, to_json/1, to_binary/1, parse/1, atomize/1]).
 
 behaviour_info(callbacks) -> [{exists, 1}, {get, 0}, {get, 1}, {post, 1}, {delete, 1}, {from_json, 2}, {to_json, 1}];
 behaviour_info(_) -> undefined.
 
 parse_transform(Forms, _Options) ->
-%    io:format("~p~n", [Forms]),
     RecordName = rest_record(Forms),
     RecordFields = record_fields(RecordName, Forms),
     Forms1 = generate({from_json, 2}, RecordName, RecordFields, Forms),
     Forms2 = generate({to_json, 1}, RecordName, RecordFields, Forms1),
-%    io:format("~p~n", [Forms2]),
     Forms2.
 
 rest_record([]) -> [];
 rest_record([{attribute, _, rest_record, RecordName} | _Forms]) -> RecordName;
 rest_record([_ | Forms]) -> rest_record(Forms).
 
-record_field({record_field, _, {atom, _, Field}   }) -> Field;
-record_field({record_field, _, {atom, _, Field}, _}) -> Field;
-record_field({typed_record_field, {record_field,_,{atom, _, Field}}, _})   -> Field;
-record_field({typed_record_field, {record_field,_,{atom, _, Field},_}, _}) -> Field.
+record_field({record_field, _, {atom, _, Field}   },_cordName) ->
+  Field;
+record_field({record_field, _, {atom, _, Field}, Type},_cordName) ->
+  Field;
+record_field({typed_record_field, {record_field,_,{atom, _, Field},_}, Type},RecordName) ->
+  Rec = allow(Type),
+  put({RecordName,Field},Rec),
+  Field.
+
+allow({type,_,union,Components}) -> findType(Components);
+allow(Type) -> findType([Type]).
+
+findType([]) -> undefined;
+findType([{type,_,record,[{atom,_,X}]}|T]) -> X;
+findType([{remote_type,_,[{atom,_,_},{atom,_,X},_]}|T]) -> X;
+findType([H|T]) ->
+  findType(T).
 
 record_fields(RecordName, [{attribute, _, record, {RecordName, Fields}} | _Forms]) ->
-    [record_field(Field) || Field <- Fields];
-record_fields(RecordName, [_ | Forms]) -> record_fields(RecordName, Forms).
+    [record_field(Field,RecordName) || Field <- Fields];
+record_fields(RecordName, [_ | Forms]) -> record_fields(RecordName, Forms);
+record_fields(__cordName, []) -> [].
 
 last_export_line(Exports) ->
     case lists:reverse(Exports) of
@@ -57,7 +69,10 @@ from_json_coda(Line) ->
     {clause, Line,
      [{cons, Line, {var, Line, '_'}, {var, Line, 'Json'}}, {var, Line, 'Acc'}],
      [],
-     [{call, Line, {atom, Line, from_json}, [{var, Line, 'Json'}, {var, Line, 'Acc'}]}]}.
+     [{call, Line, {atom, Line, from_json}, [
+%     {var, Line, 'Json'} % here is fix for recursive binarized preprocessing to raw X:from_json
+     {call,Line,{remote,Line,{atom,Line,?MODULE},{atom,Line,binarize}},[{var, Line, 'Json'}]}
+     , {var, Line, 'Acc'}]}]}.
 
 from_json_clauses(_, _, []) -> [];
 from_json_clauses(Line, Record, [Field | Fields]) ->
@@ -78,9 +93,11 @@ from_json_clauses(Line, Record, [Field | Fields]) ->
           Record,
           [{record_field, Line,
             {atom, Line, Field},
-            {call, Line,
-             {remote, Line, {atom, Line, ?MODULE}, {atom, Line, from_json}},
-             [{var, Line, field_var(Field)}]}}]}]}]}
+             {call, Line,
+             {remote, Line, {atom, Line, ?MODULE }, {atom, Line, from_json}},
+             [{var, Line, field_var(Field)},
+              {atom,Line, case get({Record,Field}) of undefined -> Record; FieldType -> FieldType end}]}
+            }]}]}]}
      | from_json_clauses(Line, Record, Fields)].
 
 generate_from_json({eof, Line}, Record, Fields) ->
@@ -114,25 +131,37 @@ generate_to_json({eof, Line}, Record, Fields) ->
 
 generate_to_json(Form, _, _) -> Form.
 
-from_json(<<Data/binary>>) -> binary_to_list(Data);
-from_json({struct, Props}) -> from_json(Props);
-from_json([{Key, _} | _] = Props) when Key =/= struct -> lists:foldr(fun props_skip/2, [], Props);
-from_json([_|_] = NonEmptyList) -> [from_json(X) || X <- NonEmptyList];
-from_json(Any) -> Any.
+from_json(<<Data/binary>>,_) ->
+  binary_to_list(Data);
+from_json({struct, Props},X) ->
+  from_json(Props,X);
+from_json([{Key,_}|_]=Props,X) when Key =/= struct ->
+  X:from_json(binarize(Props),X:new());
+from_json(Any,X) ->
+  Any.
 
-props_skip({<<BinaryKey/binary>>, Value}, Acc) ->
-    try Key = list_to_existing_atom(binary_to_list(BinaryKey)),
-        props_skip({Key, Value}, Acc)
-    catch _:_ -> Acc end;
-props_skip({Key, Value}, Acc) -> [{Key, from_json(Value)} | Acc].
+atomize([{Key,_}|_]=Props) when Key =/= struct ->
+  lists:map(fun ({K,V}) when is_atom(K) -> {K,V};
+                ({K,V}) when is_binary(K) -> {list_to_existing_atom(binary_to_list(K)),V} end, Props);
+atomize(X) -> X.
 
+binarize([{Key,_}|_]=Props) when Key =/= struct ->
+  lists:map(fun ({K,V}) when is_atom(K) -> {list_to_binary(atom_to_list(K)),allowed_value(V)};
+                ({K,V}) when is_binary(K) -> {K,allowed_value(V)} end, Props);
+binarize(X) -> X.
+
+allowed_value(X) when is_reference(X) -> [];
+allowed_value(X) -> X.
+
+to_json(X) when is_tuple(X) -> Module = hd(tuple_to_list(X)), Module:to_json(X);
 to_json(Data) ->
     case is_string(Data) of
         true  -> rest:to_binary(Data);
         false -> json_match(Data)
     end.
 
-json_match([{_, _} | _] = Props) -> [{rest:to_binary(Key), to_json(Value)} || {Key, Value} <- Props];
+json_match([{_, _} | _] = Props) ->
+  [ {rest:to_binary(Key), to_json(Value)} || {Key, Value} <- Props];
 json_match([_ | _] = NonEmptyList) -> [to_json(X) || X <- NonEmptyList];
 json_match(Any) -> Any.
 
@@ -146,3 +175,10 @@ to_binary(B) when is_binary(B) -> B;
 to_binary(I) when is_integer(I) -> to_binary(integer_to_list(I));
 to_binary(F) when is_float(F) -> float_to_binary(F,[{decimals,9},compact]);
 to_binary(L) when is_list(L) ->  iolist_to_binary(L).
+
+parse(String) when is_binary(String) -> parse(binary_to_list(String));
+parse(String) ->
+    {ok,Tokens,_EndLine} = erl_scan:string(String ++ "."),
+    {ok,AbsForm} = erl_parse:parse_exprs(Tokens),
+    {value,Value,_Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
+    Value.
