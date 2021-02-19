@@ -50,7 +50,7 @@ default_html_layout(Body) -> [<<"<html><body>">>, Body, <<"</body></html>">>].
 to_json(#{bindings := #{resource := Module, id := Id}} = Req, State) ->
     M = c(Module),
     Struct = case Id of
-                 undefined -> [{M, [ M:to_json(Resource) || Resource <- M:get() ] } ];
+                 undefined -> #{Module => [M:to_json(R) || R<- M:get()]};
                  _         -> M:to_json(M:get(Id)) end,
     {iolist_to_binary(?REST_JSON:encode(Struct)), Req, State};
 to_json(#{bindings := #{resource := _}} =Req, State) ->
