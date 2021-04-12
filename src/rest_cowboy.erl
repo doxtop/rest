@@ -68,7 +68,7 @@ handle_urlencoded_data(#{bindings:=#{resource:=M, id:=Id}} = Req, State) ->
 handle_json_data(#{bindings:=#{resource:=M, id:=Id}} = Req, State) ->
     case cowboy_req:read_body(Req) of
         {ok, Binary, Req2} ->
-            case ?REST_JSON:try_decode(Binary) of
+            case ?REST_JSON:try_decode(Binary, [{keys, 'atom'}]) of
                 {ok, Value, _} ->
                     case handle_data(c(M), Id, Value) of
                         Handled when is_boolean(Handled) -> {Handled, Req2, State};
